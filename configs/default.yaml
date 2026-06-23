@@ -1,0 +1,59 @@
+paths:
+  raw_data: data/raw
+  processed_data: data/processed
+  sample_data: data/sample
+  models: models
+
+data:
+  n_synthetic_flights: 10000
+  weather_grid_resolution: 2.0
+  random_seed: 42
+
+fuel_model:
+  type: xgboost
+  params:
+    n_estimators: 400
+    max_depth: 6
+    learning_rate: 0.05
+    subsample: 0.9
+    colsample_bytree: 0.9
+    random_state: 42
+
+delay_model:
+  type: lstm
+  sequence_length: 10
+  hidden_size: 64
+  num_layers: 2
+  dropout: 0.2
+  epochs: 15
+  batch_size: 64
+  learning_rate: 0.001
+
+optimizer:
+  graph:
+    n_lateral_offsets: 7
+    n_longitudinal_steps: 25
+    lateral_spread_deg: 6.0
+  cost_weights:
+    fuel: 1.0
+    time: 0.5
+    risk: 2.0
+    airspace_fee: 0.3
+    traffic: 0.5
+  rl_refiner:
+    n_episodes: 200
+    epsilon: 0.2
+    alpha: 0.1
+    gamma: 0.95
+
+airports:
+  JFK: [40.6413, -73.7781]
+  LHR: [51.4700, -0.4543]
+  LAX: [33.9416, -118.4085]
+  CDG: [49.0097,  2.5479]
+  DXB: [25.2532, 55.3657]
+  SIN: [ 1.3644, 103.9915]
+  HND: [35.5494, 139.7798]
+  FRA: [50.0379,  8.5622]
+  ORD: [41.9742, -87.9073]
+  SFO: [37.6213, -122.3790]
