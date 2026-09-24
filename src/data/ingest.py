@@ -1,12 +1,16 @@
 """Data ingestion: OpenSky live API, Kaggle CSV loader, and synthetic flight generator."""
 
 import itertools
-import json
+import logging
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
-import requests
+
+from src.constants import CRUISE_SPEED_KMH, KTS_TO_KMH
+from src.data.live_traffic import fetch_opensky_live
+
+logger = logging.getLogger(__name__)
 
 AIRCRAFT_SPECS = {
     "A320": {"fuel_rate": 2.55, "payload_kg": 16600, "cruise_alt_ft": 36000},
@@ -33,23 +37,29 @@ AIRPORTS = {
 
 
 def fetch_opensky_states() -> pd.DataFrame:
-    """Fetch live state vectors from the OpenSky Network REST API."""
-    try:
-        resp = requests.get("https://opensky-network.org/api/states/all", timeout=10)
-        resp.raise_for_status()
-        data = resp.json()
-        cols = ["icao24", "callsign", "origin_country", "time_position", "last_contact",
-                "longitude", "latitude", "baro_altitude", "on_ground", "velocity",
-                "true_track", "vertical_rate", "sensors", "geo_altitude",
-                "squawk", "spi", "position_source"]
-        df = pd.DataFrame(data["states"], columns=cols)
-        return df[["icao24", "latitude", "longitude", "baro_altitude", "velocity", "true_track"]]
-    except (requests.RequestException, KeyError, json.JSONDecodeError):
-        return pd.DataFrame()
+    """Fetch live state vectors from the OpenSky Network REST API.
+
+    Thin wrapper around `live_traffic.fetch_opensky_live` kept for backward
+    compatibility with the original ingest-layer column subset.
+    """
+    df = fetch_opensky_live()
+    if df.empty:
+        return df
+    return df.rename(columns={
+        "lat": "latitude", "lon": "longitude",
+        "altitude_m": "baro_altitude", "velocity_ms": "velocity",
+        "track_deg": "true_track",
+    })[["icao24", "latitude", "longitude", "baro_altitude", "velocity", "true_track"]]
 
 
 def load_kaggle_csv(path: str | Path) -> pd.DataFrame:
     """Load a Kaggle flight-delay CSV, selecting known columns that exist."""
+    path = Path(path)
+    if path.suffix.lower() != ".csv":
+        raise ValueError(f"Expected a .csv file, got: {path}")
+    if not path.is_file():
+        raise FileNotFoundError(f"CSV file not found: {path}")
+
     known_cols = [
         "flight_date", "airline", "origin", "destination", "scheduled_departure",
         "actual_departure", "departure_delay", "arrival_delay", "distance", "air_time",
@@ -108,7 +118,7 @@ def generate_synthetic_flights(n: int = 10000, seed: int = 42) -> pd.DataFrame:
         )
         fuel_kg = max(fuel_kg, distance * spec["fuel_rate"] * 0.7)
 
-        ground_speed = 850 - headwind_ms * 1.852
+        ground_speed = CRUISE_SPEED_KMH - headwind_kts * KTS_TO_KMH
         flight_time_h = distance / max(ground_speed, 400) + 0.5
 
         dep_delay = max(0, rng.gamma(2, 4) + turbulence_idx * rng.uniform(0, 30))

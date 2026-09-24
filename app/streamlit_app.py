@@ -6,24 +6,31 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT))
 
-import streamlit as st
 import pandas as pd
+import streamlit as st
 import yaml
 
 from src.data.ingest import AIRCRAFT_SPECS
-from src.data.weather import generate_weather_field
-from src.data.traffic import generate_traffic_field
-from src.data.live_traffic import fetch_opensky_live, fetch_opensky_bbox
+from src.data.live_traffic import fetch_opensky_bbox, fetch_opensky_live
 from src.data.live_weather import (
-    fetch_noaa_metars, fetch_noaa_sigmets, metars_to_dataframe,
+    fetch_noaa_metars,
+    fetch_noaa_sigmets,
+    metars_to_dataframe,
 )
+from src.data.traffic import generate_traffic_field
+from src.data.weather import generate_weather_field
 from src.models.fuel_predictor import FuelPredictor
-from src.optimization.optimizer import RouteOptimizer
-from src.utils.viz import plot_pareto, plot_comparison_bars, plot_weather_dashboard
+from src.optimization.optimizer import RouteNotFoundError, RouteOptimizer
+from src.optimization.rl_refiner import QLearningRefiner
 from src.utils.maplibre import (
-    route_map, live_traffic_map, weather_risk_map,
-    wind_barb_map, metar_station_map, traffic_corridors_map,
+    live_traffic_map,
+    metar_station_map,
+    route_map,
+    traffic_corridors_map,
+    weather_risk_map,
+    wind_barb_map,
 )
+from src.utils.viz import plot_comparison_bars, plot_pareto, plot_weather_dashboard
 
 st.set_page_config(page_title="AeroOpti", layout="wide")
 
@@ -31,8 +38,8 @@ st.set_page_config(page_title="AeroOpti", layout="wide")
 @st.cache_resource
 def load_fuel_model():
     """Load the trained fuel predictor."""
-    path = PROJECT_ROOT / "models" / "fuel_predictor.joblib"
-    if not path.exists():
+    path = PROJECT_ROOT / "models" / "fuel_predictor"
+    if not FuelPredictor.exists(path):
         return None
     return FuelPredictor.load(path)
 
@@ -67,19 +74,34 @@ def get_live_sigmets():
     return fetch_noaa_sigmets()
 
 
+@st.cache_resource
+def get_refiner(origin: str, destination: str, aircraft: str, weights_key: tuple, seed: int):
+    """Return a cached, already-trained Q-learning refiner for this route/weight combo.
+
+    Training a fresh Q-table from scratch on every "Optimize Routes" click is
+    wasted work since nothing about the route/aircraft/weights changed; this
+    keeps the learned policy across reruns for the same inputs.
+    """
+    rl_cfg = load_config().get("optimizer", {}).get("rl_refiner", {})
+    return QLearningRefiner(
+        n_episodes=rl_cfg.get("n_episodes", 200),
+        epsilon=rl_cfg.get("epsilon", 0.2),
+        alpha=rl_cfg.get("alpha", 0.1),
+        gamma=rl_cfg.get("gamma", 0.95),
+        seed=seed,
+    )
+
+
 def load_config():
     """Load default config."""
     with open(PROJECT_ROOT / "configs" / "default.yaml") as f:
         return yaml.safe_load(f)
 
 
-def main():
-    """Render the full AeroOpti dashboard."""
-    config = load_config()
-    airports = config["airports"]
-    airport_codes = sorted(airports.keys())
+def render_sidebar(config: dict) -> dict:
+    """Render the sidebar controls and return the selected route configuration."""
+    airport_codes = sorted(config["airports"].keys())
 
-    # --- Sidebar ---
     st.sidebar.title("AeroOpti")
     st.sidebar.header("Route Configuration")
 
@@ -127,90 +149,52 @@ def main():
     weights = {"fuel": w_fuel, "time": w_time, "risk": w_risk, "airspace_fee": w_fee, "traffic": w_traffic}
     run_clicked = st.sidebar.button("Optimize Routes", type="primary", use_container_width=True)
 
-    # --- Main Area ---
-    st.title("AeroOpti -- AI Flight Route Optimizer")
+    return {
+        "origin": origin, "destination": destination, "aircraft": aircraft,
+        "payload_kg": payload_kg, "cruise_alt_ft": cruise_alt_ft,
+        "weights": weights, "live_data": live_data, "run_clicked": run_clicked,
+    }
 
-    fp = load_fuel_model()
-    if fp is None:
-        st.warning(
-            "Fuel prediction model not found. Run:\n\n"
-            "```bash\npython scripts/generate_sample_data.py\npython scripts/train_models.py\n```"
-        )
-        return
 
-    if origin == destination:
-        st.error("Origin and destination must be different.")
-        return
-
-    wf = get_weather_field(config["data"]["random_seed"])
-    tf = get_traffic_field(config["data"]["random_seed"])
-
-    # --- Pre-optimization: show live data panels ---
-    if not run_clicked:
-        st.info("Configure your route in the sidebar and click **Optimize Routes** to begin.")
-        st.markdown("---")
-
-        if live_data:
-            _render_live_panels(airports, wf, tf)
-        else:
-            st.subheader("Global Traffic Corridors")
-            st.pydeck_chart(traffic_corridors_map(tf, airports=airports))
-            st.caption("Simulated traffic corridors. Toggle **Enable Live Data** in the sidebar for real-time OpenSky traffic.")
-        return
-
-    # --- Run optimization ---
-    optimizer = RouteOptimizer(fp, wf, config, traffic_field=tf)
-
-    with st.spinner("Running multi-objective optimization..."):
-        routes = optimizer.optimize(
-            origin, destination, aircraft, payload_kg,
-            cruise_alt_ft, weights, airports,
-        )
-
-    baseline = routes[0]
-    best = min(routes[1:], key=lambda r: r["fuel_kg"])
-
-    # Row 1 -- KPI cards
+def render_kpis(baseline: dict, best: dict) -> None:
+    """Render the top-row KPI comparison cards."""
     c1, c2, c3, c4 = st.columns(4)
+
+    def pct_delta(base_val: float, best_val: float) -> str:
+        if abs(base_val) < 1e-9:
+            return "n/a"
+        return f"{(base_val - best_val) / base_val * 100:.1f}%"
+
     c1.metric("Cost Saving",
               f"${baseline['cost_usd'] - best['cost_usd']:,.0f}",
-              f"{(baseline['cost_usd'] - best['cost_usd']) / baseline['cost_usd'] * 100:.1f}%")
+              pct_delta(baseline["cost_usd"], best["cost_usd"]))
     c2.metric("Fuel Saving",
               f"{baseline['fuel_kg'] - best['fuel_kg']:,.0f} kg",
-              f"{(baseline['fuel_kg'] - best['fuel_kg']) / baseline['fuel_kg'] * 100:.1f}%")
+              pct_delta(baseline["fuel_kg"], best["fuel_kg"]))
     c3.metric("CO2 Avoided",
               f"{baseline['co2_kg'] - best['co2_kg']:,.0f} kg",
-              f"{(baseline['co2_kg'] - best['co2_kg']) / baseline['co2_kg'] * 100:.1f}%")
-    time_delta_min = (best['time_h'] - baseline['time_h']) * 60
+              pct_delta(baseline["co2_kg"], best["co2_kg"]))
+    time_delta_min = (best["time_h"] - baseline["time_h"]) * 60
     c4.metric("Time Delta", f"{time_delta_min:+.0f} min")
 
-    # Row 2 -- Route map (MapLibre)
-    st.subheader("Route Map")
-    st.pydeck_chart(route_map(routes, origin, destination, airports))
 
-    # Row 3 -- Pareto + bars (keep Plotly for non-geo charts)
-    left, right = st.columns(2)
-    with left:
-        st.plotly_chart(plot_pareto(routes), use_container_width=True)
-    with right:
-        st.plotly_chart(plot_comparison_bars(routes), use_container_width=True)
-
-    # Row 4 -- Route details table
+def render_route_table(routes: list[dict]) -> None:
+    """Render the route comparison table."""
     st.subheader("Route Details")
-    table_data = []
-    for r in routes:
-        table_data.append({
-            "Route": r["name"],
-            "Fuel (kg)": f"{r['fuel_kg']:,.0f}",
-            "Time (h)": f"{r['time_h']:.2f}",
-            "Risk (0-1)": f"{r['risk']:.3f}",
-            "Congestion (0-1)": f"{r['congestion']:.3f}",
-            "CO2 (kg)": f"{r['co2_kg']:,.0f}",
-            "Est. Cost ($)": f"{r['cost_usd']:,.0f}",
-        })
+    table_data = [{
+        "Route": r["name"],
+        "Fuel (kg)": f"{r['fuel_kg']:,.0f}",
+        "Time (h)": f"{r['time_h']:.2f}",
+        "Risk (0-1)": f"{r['risk']:.3f}",
+        "Congestion (0-1)": f"{r['congestion']:.3f}",
+        "CO2 (kg)": f"{r['co2_kg']:,.0f}",
+        "Est. Cost ($)": f"{r['cost_usd']:,.0f}",
+    } for r in routes]
     st.dataframe(pd.DataFrame(table_data), use_container_width=True, hide_index=True)
 
-    # Row 5 -- Environment layers (MapLibre tabs)
+
+def render_environment_tabs(routes: list[dict], wf, tf, airports: dict, origin: str, destination: str, live_data: bool) -> None:
+    """Render the tabbed environment-layer maps (weather, wind, traffic, live data)."""
     all_lats = [p[0] for r in routes for p in r["points"]]
     all_lons = [p[1] for r in routes for p in r["points"]]
     lat_bounds = (min(all_lats) - 10, max(all_lats) + 10)
@@ -272,6 +256,87 @@ def main():
             plot_weather_dashboard(wf, lat_bounds, lon_bounds, routes),
             use_container_width=True,
         )
+
+
+def render_pre_optimization(cfg: dict, airports: dict, wf, tf) -> None:
+    """Render the landing panels shown before the user clicks Optimize Routes."""
+    st.info("Configure your route in the sidebar and click **Optimize Routes** to begin.")
+    st.markdown("---")
+
+    if cfg["live_data"]:
+        _render_live_panels(airports, wf, tf)
+    else:
+        st.subheader("Global Traffic Corridors")
+        st.pydeck_chart(traffic_corridors_map(tf, airports=airports))
+        st.caption("Simulated traffic corridors. Toggle **Enable Live Data** in the sidebar for real-time OpenSky traffic.")
+
+
+def run_optimization_and_render(cfg: dict, config: dict, airports: dict, fp, wf, tf) -> None:
+    """Run the route optimizer and render the results section."""
+    optimizer = RouteOptimizer(fp, wf, config, traffic_field=tf)
+    weights_key = tuple(sorted(cfg["weights"].items()))
+    refiner = get_refiner(
+        cfg["origin"], cfg["destination"], cfg["aircraft"],
+        weights_key, config["data"]["random_seed"],
+    )
+
+    try:
+        with st.spinner("Running multi-objective optimization..."):
+            routes = optimizer.optimize(
+                cfg["origin"], cfg["destination"], cfg["aircraft"], cfg["payload_kg"],
+                cfg["cruise_alt_ft"], cfg["weights"], airports, refiner=refiner,
+            )
+    except RouteNotFoundError as exc:
+        st.error(f"Route optimization failed: {exc}")
+        return
+
+    baseline = routes[0]
+    best = min(routes[1:], key=lambda r: r["fuel_kg"])
+
+    render_kpis(baseline, best)
+
+    st.subheader("Route Map")
+    st.pydeck_chart(route_map(routes, cfg["origin"], cfg["destination"], airports))
+
+    left, right = st.columns(2)
+    with left:
+        st.plotly_chart(plot_pareto(routes), use_container_width=True)
+    with right:
+        st.plotly_chart(plot_comparison_bars(routes), use_container_width=True)
+
+    render_route_table(routes)
+    render_environment_tabs(routes, wf, tf, airports, cfg["origin"], cfg["destination"], cfg["live_data"])
+
+
+def main():
+    """Render the full AeroOpti dashboard."""
+    config = load_config()
+    airports = config["airports"]
+
+    cfg = render_sidebar(config)
+
+    st.title("AeroOpti -- AI Flight Route Optimizer")
+
+    fp = load_fuel_model()
+    if fp is None:
+        st.warning(
+            "Fuel prediction model not found. Run:\n\n"
+            "```bash\npython scripts/generate_sample_data.py\npython scripts/train_models.py\n```"
+        )
+        return
+
+    if cfg["origin"] == cfg["destination"]:
+        st.error("Origin and destination must be different.")
+        return
+
+    wf = get_weather_field(config["data"]["random_seed"])
+    tf = get_traffic_field(config["data"]["random_seed"])
+
+    if not cfg["run_clicked"]:
+        render_pre_optimization(cfg, airports, wf, tf)
+        return
+
+    run_optimization_and_render(cfg, config, airports, fp, wf, tf)
 
     st.caption(
         "AeroOpti -- Decision support only. Pilots and dispatchers retain "

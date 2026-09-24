@@ -21,18 +21,19 @@ def main():
     print("\n" + "=" * 50)
     print("MODEL TRAINING COMPLETE")
     print("=" * 50)
-    print(f"\nFuel Predictor (XGBoost):")
+    print("\nFuel Predictor (XGBoost):")
     for k, v in results["fuel"].items():
         print(f"  {k}: {v:.4f}")
-    print(f"\nDelay Predictor (LSTM):")
+    print("\nDelay Predictor (LSTM):")
     for k, v in results["delay"].items():
         print(f"  {k}: {v:.4f}")
 
     project_root = Path(__file__).resolve().parents[1]
     model_dir = project_root / config["paths"]["models"]
     print(f"\nArtifacts saved to: {model_dir}")
-    print(f"  - fuel_predictor.joblib")
-    print(f"  - delay_predictor.pt")
+    print("  - fuel_predictor.xgb.json / fuel_predictor.meta.json")
+    print("  - delay_predictor.pt")
+    print("  - latest_metrics.json / training_history.jsonl")
 
 
 if __name__ == "__main__":

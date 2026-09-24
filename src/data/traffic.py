@@ -1,6 +1,5 @@
 """Simulated air traffic density field for congestion-aware routing."""
 
-import math
 from dataclasses import dataclass
 
 import numpy as np

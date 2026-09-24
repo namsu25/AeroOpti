@@ -1,25 +1,85 @@
 """Live weather data from Open-Meteo and NOAA Aviation Weather APIs."""
 
+import logging
 import math
-from dataclasses import dataclass, field
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from dataclasses import dataclass
 
 import numpy as np
 import pandas as pd
 import requests
+from requests.adapters import HTTPAdapter, Retry
 from scipy.ndimage import gaussian_filter
 
 from src.data.weather import WeatherField
+
+logger = logging.getLogger(__name__)
+
+_RETRY = Retry(
+    total=3, backoff_factor=0.5,
+    status_forcelist=[429, 500, 502, 503, 504],
+    allowed_methods=["GET"],
+)
+
+
+def _session() -> requests.Session:
+    """Build a requests session with connection pooling and retry/backoff."""
+    s = requests.Session()
+    adapter = HTTPAdapter(max_retries=_RETRY, pool_maxsize=16)
+    s.mount("https://", adapter)
+    s.mount("http://", adapter)
+    return s
+
+
+def _fetch_one_point(session: requests.Session, lat: float, lon: float) -> tuple | None:
+    """Fetch wind speed/direction/temperature at 250hPa for a single point."""
+    try:
+        params = {
+            "latitude": float(lat),
+            "longitude": float(lon),
+            "hourly": "wind_speed_250hPa,wind_direction_250hPa,temperature_250hPa",
+            "forecast_days": 1,
+            "timezone": "UTC",
+        }
+        resp = session.get(
+            "https://api.open-meteo.com/v1/forecast",
+            params=params, timeout=8,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        hourly = data.get("hourly", {})
+
+        ws_list = hourly.get("wind_speed_250hPa", [])
+        wd_list = hourly.get("wind_direction_250hPa", [])
+        t_list = hourly.get("temperature_250hPa", [])
+
+        if not ws_list or not wd_list:
+            return None
+
+        ws = _first_valid(ws_list)
+        wd = _first_valid(wd_list)
+        t = _first_valid(t_list) if t_list else 0.0
+
+        if ws is None or wd is None:
+            return None
+
+        return lat, lon, ws, wd, t
+    except (requests.RequestException, KeyError, ValueError) as exc:
+        logger.warning("Open-Meteo fetch failed for (%.1f, %.1f): %s", lat, lon, exc)
+        return None
 
 
 def fetch_openmeteo_winds(
     lat_range: tuple[float, float] = (20, 65),
     lon_range: tuple[float, float] = (-90, 20),
     resolution: float = 2.0,
+    max_workers: int = 8,
 ) -> WeatherField | None:
     """Fetch upper-level winds and temperature from Open-Meteo forecast API.
 
     Queries the 250hPa pressure level (approx FL340) for wind_u, wind_v, and
-    temperature across a lat/lon grid. Falls back to None on failure.
+    temperature across a lat/lon grid, in parallel with retry/backoff.
+    Falls back to zeroed grids where individual points fail.
     """
     lat_grid = np.arange(lat_range[0], lat_range[1] + resolution, resolution)
     lon_grid = np.arange(lon_range[0], lon_range[1] + resolution, resolution)
@@ -28,56 +88,29 @@ def fetch_openmeteo_winds(
     wind_u = np.zeros((H, W))
     wind_v = np.zeros((H, W))
     temperature = np.zeros((H, W))
-    risk = np.zeros((H, W))
 
     sample_lats = lat_grid[::max(1, H // 8)]
     sample_lons = lon_grid[::max(1, W // 8)]
+    sample_points = [(lat, lon) for lat in sample_lats for lon in sample_lons]
 
-    for lat in sample_lats:
-        for lon in sample_lons:
-            try:
-                params = {
-                    "latitude": float(lat),
-                    "longitude": float(lon),
-                    "hourly": "wind_speed_250hPa,wind_direction_250hPa,temperature_250hPa",
-                    "forecast_days": 1,
-                    "timezone": "UTC",
-                }
-                resp = requests.get(
-                    "https://api.open-meteo.com/v1/forecast",
-                    params=params, timeout=8,
-                )
-                resp.raise_for_status()
-                data = resp.json()
-                hourly = data.get("hourly", {})
-
-                ws_list = hourly.get("wind_speed_250hPa", [])
-                wd_list = hourly.get("wind_direction_250hPa", [])
-                t_list = hourly.get("temperature_250hPa", [])
-
-                if not ws_list or not wd_list:
-                    continue
-
-                ws = _first_valid(ws_list)
-                wd = _first_valid(wd_list)
-                t = _first_valid(t_list) if t_list else 0.0
-
-                if ws is None or wd is None:
-                    continue
-
-                ws_ms = ws / 3.6
-                wd_rad = math.radians(wd)
-                u = -ws_ms * math.sin(wd_rad)
-                v = -ws_ms * math.cos(wd_rad)
-
-                i = int(np.argmin(np.abs(lat_grid - lat)))
-                j = int(np.argmin(np.abs(lon_grid - lon)))
-                wind_u[i, j] = u
-                wind_v[i, j] = v
-                temperature[i, j] = t + 56.5
-
-            except (requests.RequestException, KeyError, ValueError):
+    with _session() as session, ThreadPoolExecutor(max_workers=max_workers) as pool:
+        futures = [pool.submit(_fetch_one_point, session, lat, lon) for lat, lon in sample_points]
+        for future in as_completed(futures):
+            result = future.result()
+            if result is None:
                 continue
+            lat, lon, ws, wd, t = result
+
+            ws_ms = ws / 3.6
+            wd_rad = math.radians(wd)
+            u = -ws_ms * math.sin(wd_rad)
+            v = -ws_ms * math.cos(wd_rad)
+
+            i = int(np.argmin(np.abs(lat_grid - lat)))
+            j = int(np.argmin(np.abs(lon_grid - lon)))
+            wind_u[i, j] = u
+            wind_v[i, j] = v
+            temperature[i, j] = t + 56.5
 
     wind_u = gaussian_filter(wind_u, sigma=2)
     wind_v = gaussian_filter(wind_v, sigma=2)
@@ -125,7 +158,7 @@ def fetch_noaa_metars(bbox: tuple[float, float, float, float] | None = None) -> 
         if bbox:
             params["bbox"] = f"{bbox[1]},{bbox[0]},{bbox[3]},{bbox[2]}"
 
-        resp = requests.get(url, params=params, timeout=15)
+        resp = _session().get(url, params=params, timeout=15)
         resp.raise_for_status()
         data = resp.json()
 
@@ -146,7 +179,8 @@ def fetch_noaa_metars(bbox: tuple[float, float, float, float] | None = None) -> 
                 altimeter_inhg=float(m.get("altim", 29.92) or 29.92),
             ))
         return reports
-    except (requests.RequestException, KeyError, ValueError):
+    except (requests.RequestException, KeyError, ValueError) as exc:
+        logger.warning("NOAA METAR fetch failed: %s", exc)
         return []
 
 
@@ -155,7 +189,7 @@ def fetch_noaa_sigmets() -> list[AviationWeatherReport]:
     try:
         url = "https://aviationweather.gov/api/data/airsigmet"
         params = {"format": "json"}
-        resp = requests.get(url, params=params, timeout=15)
+        resp = _session().get(url, params=params, timeout=15)
         resp.raise_for_status()
         data = resp.json()
 
@@ -178,7 +212,8 @@ def fetch_noaa_sigmets() -> list[AviationWeatherReport]:
                 severity=s.get("severity", ""),
             ))
         return reports
-    except (requests.RequestException, KeyError, ValueError):
+    except (requests.RequestException, KeyError, ValueError) as exc:
+        logger.warning("NOAA SIGMET fetch failed: %s", exc)
         return []
 
 

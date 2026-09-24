@@ -18,18 +18,20 @@ Operational delays exhibit strong temporal autocorrelation — a delayed departu
 
 ## Cost Function
 
-The multi-objective cost per edge combines four terms:
+The multi-objective cost per edge combines five terms:
 
 ```
-edge_cost = α × (fuel_kg / 10000) + β × time_h + γ × turbulence_idx + δ × (0.001 × distance_km)
+edge_cost = α × (fuel_kg / 10000) + β × time_h + γ × turbulence_idx
+          + δ × (0.001 × distance_km) + ε × congestion
 ```
 
 - **α (fuel)**: Normalized by 10,000 kg to bring fuel into a comparable scale with time
 - **β (time)**: Hours of flight time for the segment
 - **γ (risk)**: Turbulence/convective risk index [0,1] — the primary safety lever
 - **δ (airspace fee)**: Proxy for overflight charges, proportional to distance
+- **ε (traffic)**: Congestion index [0,1] sampled from the traffic density field — trades off routing through busy corridors
 
-Dispatchers adjust these weights through the dashboard to express operational priorities (cost-sensitive, schedule-critical, or safety-first).
+Dispatchers adjust these weights through the dashboard to express operational priorities (cost-sensitive, schedule-critical, safety-first, or traffic-averse).
 
 ## Weather Grid
 

@@ -50,11 +50,14 @@ def multi_objective_astar(
 
         for neighbor in graph.successors(current):
             edge = graph.edges[current, neighbor]
-            fuel = fuel_predictor.predict_row(
-                aircraft, edge["distance_km"], cruise_alt_ft,
-                payload_kg, edge["headwind_kts"],
-                edge["temp_dev_c"], edge["turbulence_idx"],
-            )
+            if "fuel_kg" in edge:
+                fuel = edge["fuel_kg"]
+            else:
+                fuel = fuel_predictor.predict_row(
+                    aircraft, edge["distance_km"], cruise_alt_ft,
+                    payload_kg, edge["headwind_kts"],
+                    edge["temp_dev_c"], edge["turbulence_idx"],
+                )
             time_h = edge["distance_km"] / CRUISE_SPEED_KMH
             risk_val = edge["turbulence_idx"]
             fee = 0.001 * edge["distance_km"]

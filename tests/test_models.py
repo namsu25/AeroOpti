@@ -3,8 +3,6 @@
 import tempfile
 from pathlib import Path
 
-import numpy as np
-
 from src.data.ingest import generate_synthetic_flights
 from src.data.preprocess import build_delay_sequences
 from src.models.fuel_predictor import FuelPredictor

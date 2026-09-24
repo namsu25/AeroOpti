@@ -1,10 +1,10 @@
 """Build a waypoint graph over a great-circle corridor for route optimization."""
 
-import math
-
 import networkx as nx
 import numpy as np
+import pandas as pd
 
+from src.constants import KTS_TO_MS
 from src.utils.geo import bearing, destination_point, great_circle_path, haversine
 
 
@@ -16,8 +16,18 @@ def build_waypoint_graph(
     n_longitudinal: int = 25,
     lateral_spread_deg: float = 6.0,
     traffic_field=None,
+    fuel_predictor=None,
+    aircraft: str | None = None,
+    payload_kg: float | None = None,
+    cruise_alt_ft: float | None = None,
 ) -> nx.DiGraph:
-    """Construct a directed graph of waypoints along a great-circle corridor."""
+    """Construct a directed graph of waypoints along a great-circle corridor.
+
+    If `fuel_predictor` (and the flight parameters it needs) are supplied,
+    per-edge fuel burn is predicted once for the whole graph in a single
+    batched call and cached as the `fuel_kg` edge attribute, instead of
+    being predicted one row at a time during A* search.
+    """
     gc_points = great_circle_path(
         origin[0], origin[1], destination[0], destination[1], n_points=n_longitudinal,
     )
@@ -56,6 +66,9 @@ def build_waypoint_graph(
     for node_id in columns[-1]:
         _add_edge(G, node_id, sink_id, weather_field, traffic_field)
 
+    if fuel_predictor is not None:
+        _precompute_edge_fuel(G, fuel_predictor, aircraft, payload_kg, cruise_alt_ft)
+
     return G
 
 
@@ -81,6 +94,34 @@ def _add_edge(G: nx.DiGraph, u: str, v: str, weather_field, traffic_field=None) 
                mid_lat=mid_lat,
                mid_lon=mid_lon,
                turbulence_idx=wx["risk"],
-               headwind_kts=headwind / 0.5144,
+               headwind_kts=headwind / KTS_TO_MS,
                temp_dev_c=wx["temp_dev_c"],
                congestion=congestion)
+
+
+def _precompute_edge_fuel(
+    G: nx.DiGraph, fuel_predictor, aircraft: str, payload_kg: float, cruise_alt_ft: float,
+) -> None:
+    """Batch-predict fuel burn for every edge and cache it as `fuel_kg`."""
+    edges = list(G.edges(data=True))
+    if not edges:
+        return
+
+    rows = [{
+        "distance_km": data["distance_km"],
+        "cruise_alt_ft": cruise_alt_ft,
+        "payload_kg": payload_kg,
+        "headwind_kts": data["headwind_kts"],
+        "temp_dev_c": data["temp_dev_c"],
+        "turbulence_idx": data["turbulence_idx"],
+    } for _, _, data in edges]
+
+    df = pd.DataFrame(rows)
+    ac_col = f"ac_{aircraft}"
+    for fn in fuel_predictor.feature_names:
+        if fn.startswith("ac_"):
+            df[fn] = 1.0 if fn == ac_col else 0.0
+
+    fuel_values = fuel_predictor.predict_segments(df)
+    for (u, v, _), fuel in zip(edges, fuel_values):
+        G.edges[u, v]["fuel_kg"] = float(fuel)

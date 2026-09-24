@@ -1,11 +1,14 @@
 """High-level route optimization orchestrator."""
 
-from src.data.ingest import AIRCRAFT_SPECS
+from src.constants import CO2_KG_PER_KG_FUEL, CRUISE_SPEED_KMH, JET_FUEL_USD_PER_KG, KTS_TO_MS
 from src.optimization.astar import multi_objective_astar
 from src.optimization.graph_builder import build_waypoint_graph
 from src.optimization.rl_refiner import QLearningRefiner
-from src.constants import CO2_KG_PER_KG_FUEL, CRUISE_SPEED_KMH, JET_FUEL_USD_PER_KG, KTS_TO_MS
 from src.utils.geo import bearing, great_circle_path, haversine
+
+
+class RouteNotFoundError(RuntimeError):
+    """Raised when the optimizer cannot find a connected route between airports."""
 
 
 class RouteOptimizer:
@@ -26,8 +29,13 @@ class RouteOptimizer:
         cruise_alt_ft: float,
         weights: dict,
         airports_dict: dict,
+        refiner: QLearningRefiner | None = None,
     ) -> list[dict]:
-        """Return 3 route alternatives: baseline, A*, and A*+RL."""
+        """Return 3 route alternatives: baseline, A*, and A*+RL.
+
+        `refiner` may be supplied by the caller (e.g. cached across requests
+        in the Streamlit app) instead of training a fresh Q-table on every call.
+        """
         origin = tuple(airports_dict[origin_code])
         destination = tuple(airports_dict[destination_code])
 
@@ -38,6 +46,10 @@ class RouteOptimizer:
             n_longitudinal=gc_cfg.get("n_longitudinal_steps", 25),
             lateral_spread_deg=gc_cfg.get("lateral_spread_deg", 6.0),
             traffic_field=self.traffic_field,
+            fuel_predictor=self.fuel_predictor,
+            aircraft=aircraft,
+            payload_kg=payload_kg,
+            cruise_alt_ft=cruise_alt_ft,
         )
 
         baseline = self._baseline_route(origin, destination, aircraft, payload_kg, cruise_alt_ft)
@@ -46,18 +58,21 @@ class RouteOptimizer:
             graph, "SRC", "SNK", self.fuel_predictor,
             aircraft, payload_kg, cruise_alt_ft, weights, self.weather_field,
         )
+        self._validate_route(astar_result, origin_code, destination_code)
 
-        rl_cfg = self.config.get("optimizer", {}).get("rl_refiner", {})
-        refiner = QLearningRefiner(
-            n_episodes=rl_cfg.get("n_episodes", 200),
-            epsilon=rl_cfg.get("epsilon", 0.2),
-            alpha=rl_cfg.get("alpha", 0.1),
-            gamma=rl_cfg.get("gamma", 0.95),
-        )
+        if refiner is None:
+            rl_cfg = self.config.get("optimizer", {}).get("rl_refiner", {})
+            refiner = QLearningRefiner(
+                n_episodes=rl_cfg.get("n_episodes", 200),
+                epsilon=rl_cfg.get("epsilon", 0.2),
+                alpha=rl_cfg.get("alpha", 0.1),
+                gamma=rl_cfg.get("gamma", 0.95),
+            )
         rl_result = refiner.refine(
             astar_result["path"], graph, self.fuel_predictor,
             self.weather_field, aircraft, payload_kg, cruise_alt_ft, weights,
         )
+        self._validate_route(rl_result, origin_code, destination_code)
 
         jet_fuel_per_kg = JET_FUEL_USD_PER_KG
         co2_factor = CO2_KG_PER_KG_FUEL
@@ -99,6 +114,14 @@ class RouteOptimizer:
         ]
         return routes
 
+    @staticmethod
+    def _validate_route(result: dict, origin_code: str, destination_code: str) -> None:
+        """Raise if a route candidate has no path or non-positive fuel."""
+        if not result["path"] or result["total_fuel_kg"] <= 0:
+            raise RouteNotFoundError(
+                f"No connected route found between {origin_code} and {destination_code}."
+            )
+
     def _baseline_route(
         self, origin: tuple, destination: tuple,
         aircraft: str, payload_kg: float, cruise_alt_ft: float,
@@ -136,10 +159,18 @@ class RouteOptimizer:
         }
 
     def _mean_congestion(self, path: list[tuple[float, float]]) -> float:
-        """Compute average traffic congestion along a route path."""
+        """Compute distance-weighted average traffic congestion along a route path."""
         if self.traffic_field is None or len(path) < 2:
             return 0.0
-        total = 0.0
-        for lat, lon in path:
-            total += self.traffic_field.sample(lat, lon)["congestion"]
-        return total / len(path)
+        weighted_sum = 0.0
+        total_dist = 0.0
+        for i in range(len(path) - 1):
+            lat1, lon1 = path[i]
+            lat2, lon2 = path[i + 1]
+            seg_dist = haversine(lat1, lon1, lat2, lon2)
+            mid_lat = (lat1 + lat2) / 2
+            mid_lon = (lon1 + lon2) / 2
+            congestion = self.traffic_field.sample(mid_lat, mid_lon)["congestion"]
+            weighted_sum += congestion * seg_dist
+            total_dist += seg_dist
+        return weighted_sum / total_dist if total_dist > 0 else 0.0
