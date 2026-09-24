@@ -29,5 +29,11 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python-version }}
+      # Install CPU-only torch first: the default PyPI wheel pulls in several GB
+      # of CUDA/NVIDIA packages that GitHub's runners have no GPU to use, and
+      # which exhaust the runner's disk ("No space left on device"). Once this
+      # is satisfied, requirements.txt's `torch>=2.1,<3.0` is already met and
+      # pip won't try to reinstall the CUDA build.
+      - run: pip install torch --index-url https://download.pytorch.org/whl/cpu
       - run: pip install -e . -r requirements.txt
       - run: pytest tests/ -v --cov=src --cov-report=term-missing
