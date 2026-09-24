@@ -1,8 +1,6 @@
 """Airport and route database from OurAirports and OpenFlights open datasets."""
 
-import csv
 import io
-import json
 from pathlib import Path
 
 import pandas as pd

@@ -1,6 +1,5 @@
 """Tests for A* route optimizer."""
 
-import pandas as pd
 
 from src.data.ingest import generate_synthetic_flights
 from src.data.weather import generate_weather_field
@@ -38,7 +37,8 @@ def test_astar_beats_baseline():
     weights = {"fuel": 1.0, "time": 0.5, "risk": 2.0, "airspace_fee": 0.3}
     result = multi_objective_astar(graph, "SRC", "SNK", fp, "B777", 48375, 37000, weights, wf)
 
-    from src.utils.geo import great_circle_path, bearing as brng_fn
+    from src.utils.geo import bearing as brng_fn
+    from src.utils.geo import great_circle_path
     path = great_circle_path(origin[0], origin[1], dest[0], dest[1], n_points=10)
     baseline_fuel = 0.0
     for i in range(len(path) - 1):

@@ -1,8 +1,8 @@
 """XGBoost-based fuel burn predictor."""
 
+import json
 from pathlib import Path
 
-import joblib
 import numpy as np
 import pandas as pd
 import xgboost as xgb
@@ -51,16 +51,17 @@ class FuelPredictor:
         turbulence_idx: float,
     ) -> float:
         """Predict fuel_kg for a single flight segment."""
-        row = {
+        base = {
             "distance_km": distance_km, "cruise_alt_ft": cruise_alt_ft,
             "payload_kg": payload_kg, "headwind_kts": headwind_kts,
             "temp_dev_c": temp_dev_c, "turbulence_idx": turbulence_idx,
         }
-        for fn in self.feature_names:
-            if fn.startswith("ac_"):
-                ac_code = fn.replace("ac_", "")
-                row[fn] = 1.0 if ac_code == aircraft else 0.0
-        x = pd.DataFrame([row])[self.feature_names]
+        ac_col = f"ac_{aircraft}"
+        values = [
+            base[fn] if fn in base else (1.0 if fn == ac_col else 0.0)
+            for fn in self.feature_names
+        ]
+        x = pd.DataFrame([values], columns=self.feature_names)
         return float(self.model.predict(x)[0])
 
     def predict_segments(self, segments_df: pd.DataFrame) -> np.ndarray:
@@ -68,16 +69,39 @@ class FuelPredictor:
         return self.model.predict(segments_df[self.feature_names])
 
     def save(self, path: str | Path) -> None:
-        """Persist model and feature names via joblib."""
+        """Persist the model and feature names without pickle.
+
+        Writes two sidecar files next to `path`: `<name>.xgb.json` (the
+        XGBoost booster in its native JSON format) and `<name>.meta.json`
+        (feature names). Native format avoids the arbitrary-code-execution
+        risk of unpickling a joblib/pickle file from an untrusted source.
+        """
         path = Path(path)
         path.parent.mkdir(parents=True, exist_ok=True)
-        joblib.dump({"model": self.model, "feature_names": self.feature_names}, path)
+        self.model.save_model(str(self._model_path(path)))
+        self._meta_path(path).write_text(json.dumps({"feature_names": self.feature_names}))
 
     @classmethod
     def load(cls, path: str | Path) -> "FuelPredictor":
-        """Load a saved FuelPredictor."""
-        data = joblib.load(path)
+        """Load a FuelPredictor saved via `save`."""
+        path = Path(path)
+        meta = json.loads(cls._meta_path(path).read_text())
         obj = cls.__new__(cls)
-        obj.model = data["model"]
-        obj.feature_names = data["feature_names"]
+        obj.model = xgb.XGBRegressor()
+        obj.model.load_model(str(cls._model_path(path)))
+        obj.feature_names = meta["feature_names"]
         return obj
+
+    @staticmethod
+    def exists(path: str | Path) -> bool:
+        """Check whether a saved model is present at `path`."""
+        path = Path(path)
+        return FuelPredictor._model_path(path).exists() and FuelPredictor._meta_path(path).exists()
+
+    @staticmethod
+    def _model_path(path: Path) -> Path:
+        return path.with_name(path.name + ".xgb.json")
+
+    @staticmethod
+    def _meta_path(path: Path) -> Path:
+        return path.with_name(path.name + ".meta.json")

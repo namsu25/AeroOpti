@@ -11,6 +11,15 @@
 
 Trained on 8,500 samples (85% of 10,000 synthetic flights), validated on 1,500.
 
+> **Caveat**: `fuel_kg` in the synthetic generator is computed as a near-closed-form
+> function of `distance_km`, `payload_kg`, `headwind_kts`, `temp_dev_c`, and
+> `turbulence_idx` (see `src/data/ingest.py::generate_synthetic_flights`), and those
+> same variables are fed back in as the model's features. The high R² therefore
+> reflects the model's ability to invert a known formula from ~2% noise ("synthetic
+> self-consistency"), not real-world predictive accuracy. Treat these numbers as a
+> sanity check on the training pipeline, not a claim about production fuel-burn
+> accuracy — see Known Limitations below.
+
 ## Delay Predictor (LSTM)
 
 | Metric | Target    | Typical Result |

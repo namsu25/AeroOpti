@@ -7,7 +7,6 @@ import numpy as np
 from src.constants import CRUISE_SPEED_KMH, KTS_TO_MS
 from src.utils.geo import bearing, destination_point, haversine
 
-
 _ACTIONS = [-2, -1, 0, 1, 2]
 _N_ACTIONS = len(_ACTIONS)
 _LATERAL_STEP_KM = 60.0

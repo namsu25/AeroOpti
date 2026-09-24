@@ -1,10 +1,13 @@
 """Live flight traffic from OpenSky Network REST API."""
 
 import json
+import logging
 
 import numpy as np
 import pandas as pd
 import requests
+
+logger = logging.getLogger(__name__)
 
 
 def fetch_opensky_live(
@@ -54,7 +57,8 @@ def fetch_opensky_live(
         })[["icao24", "callsign", "origin_country", "lat", "lon",
             "altitude_m", "velocity_ms", "track_deg", "vertical_rate", "on_ground"]].reset_index(drop=True)
 
-    except (requests.RequestException, KeyError, json.JSONDecodeError):
+    except (requests.RequestException, KeyError, json.JSONDecodeError) as exc:
+        logger.warning("OpenSky live traffic fetch failed: %s", exc)
         return pd.DataFrame()
 
 
