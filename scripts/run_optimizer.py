@@ -6,8 +6,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from src.data.weather import generate_weather_field
 from src.data.traffic import generate_traffic_field
+from src.data.weather import generate_weather_field
 from src.models.fuel_predictor import FuelPredictor
 from src.models.train import load_config
 from src.optimization.optimizer import RouteOptimizer
@@ -27,8 +27,8 @@ def main():
     project_root = Path(__file__).resolve().parents[1]
     model_dir = project_root / config["paths"]["models"]
 
-    print(f"Loading fuel predictor from {model_dir / 'fuel_predictor.joblib'}...")
-    fp = FuelPredictor.load(model_dir / "fuel_predictor.joblib")
+    print(f"Loading fuel predictor from {model_dir / 'fuel_predictor'}...")
+    fp = FuelPredictor.load(model_dir / "fuel_predictor")
 
     print("Generating weather field...")
     wf = generate_weather_field(seed=config["data"]["random_seed"])

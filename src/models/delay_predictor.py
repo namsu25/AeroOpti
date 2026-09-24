@@ -47,6 +47,7 @@ class DelayPredictor:
             "epochs": kwargs.get("epochs", 15),
             "batch_size": kwargs.get("batch_size", 64),
             "lr": kwargs.get("lr", 1e-3),
+            "seed": kwargs.get("seed", 42),
         }
         self.model: _LSTMRegressor | None = None
         self.mean: np.ndarray | None = None
@@ -56,6 +57,7 @@ class DelayPredictor:
 
     def fit(self, df) -> dict:
         """Train on a flights DataFrame and return validation metrics."""
+        torch.manual_seed(self.cfg["seed"])
         X, y = build_delay_sequences(df, self.cfg["sequence_length"])
         if len(X) == 0:
             return {"mae": float("inf"), "rmse": float("inf")}

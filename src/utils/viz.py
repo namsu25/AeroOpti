@@ -1,8 +1,8 @@
 """Plotly visualization helpers for routes, Pareto charts, weather, and traffic."""
 
+import numpy as np
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
-import numpy as np
 
 
 def plot_route_map(routes: list[dict], origin: str, destination: str, airports: dict) -> go.Figure:
@@ -64,9 +64,6 @@ def plot_pareto(routes: list[dict]) -> go.Figure:
 
 def plot_comparison_bars(routes: list[dict]) -> go.Figure:
     """Grouped bar chart comparing fuel, CO2, and cost across routes."""
-    names = [r["name"] for r in routes]
-    colors = [r["color"] for r in routes]
-
     fig = go.Figure()
     for i, route in enumerate(routes):
         fig.add_trace(go.Bar(

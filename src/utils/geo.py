@@ -1,7 +1,6 @@
 """Geographic utility functions: haversine, bearing, great-circle interpolation."""
 
 import math
-import numpy as np
 
 EARTH_RADIUS_KM = 6371.0
 

@@ -51,7 +51,6 @@ def route_map(
             "time": route["time_h"],
         }]
         width = 2 if "Baseline" in route["name"] else 4
-        dash = [6, 4] if "Baseline" in route["name"] else None
 
         layers.append(pdk.Layer(
             "PathLayer",

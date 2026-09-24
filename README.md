@@ -2,7 +2,9 @@
 
 **AI-driven flight route optimizer and fuel consumption predictor for airline dispatch and operations.**
 
-AeroOpti is a decision-support system that ingests aviation and weather data, predicts fuel burn and arrival delays using trained ML models, generates multi-objective route candidates, and surfaces human-centric trade-off decisions in an interactive Streamlit dashboard with MapLibre/OSM maps.
+AeroOpti is a decision-support system that ingests aviation and weather data, predicts fuel burn and arrival delays using trained ML models, generates multi-objective route candidates, and surfaces human-centric trade-off decisions in an interactive React dashboard with a real MapLibre GL JS map.
+
+The app is now split into a **FastAPI backend** (`backend/`, wraps the existing Python ML/optimization pipeline as a JSON API) and a **React + TypeScript frontend** (`frontend/`, Vite + MapLibre GL JS + Recharts). The original Streamlit app (`app/streamlit_app.py`) still works and is kept as a lightweight alternative, but the React app is the primary UI going forward.
 
 > **Note**: This is decision support — dispatchers and pilots retain final authority.
 
@@ -12,11 +14,11 @@ AeroOpti is a decision-support system that ingests aviation and weather data, pr
 
 ## Features
 
-- **Fuel Prediction** — XGBoost model trained on synthetic BADA-style performance data (R2 ~ 0.998)
+- **Fuel Prediction** — XGBoost model trained on synthetic BADA-style performance data (see the R² caveat in [docs/EVALUATION.md](docs/EVALUATION.md))
 - **Delay Prediction** — PyTorch LSTM capturing temporal delay propagation patterns (MAE ~ 7 min)
 - **Multi-Objective Route Optimization** — A* search over waypoint graphs with configurable cost weights
 - **RL Risk Refinement** — Q-learning agent that reduces turbulence exposure over pure A*
-- **MapLibre + OSM Maps** — Interactive pydeck maps on OpenStreetMap dark tiles
+- **Real Interactive Map** — MapLibre GL JS (vector basemap, pan/zoom/hover tooltips) with toggleable layers: routes, weather-risk heatmap, wind field, traffic corridors, live traffic, NOAA METARs — all on one map instead of separate embeds
 - **Live Data Sources** — OpenSky (traffic), Open-Meteo (winds), NOAA Aviation Weather (METARs/SIGMETs), OurAirports, OpenFlights
 - **Fully Offline Mode** — Runs entirely on synthetic data with no API keys required
 
@@ -99,7 +101,7 @@ Training delay predictor (LSTM)...
   MAE=6.81 min  RMSE=8.74 min
 ```
 
-This creates `models/fuel_predictor.joblib` and `models/delay_predictor.pt`.
+This creates `models/fuel_predictor.xgb.json` + `models/fuel_predictor.meta.json` (native XGBoost format, no pickle) and `models/delay_predictor.pt`, plus `models/latest_metrics.json` and `models/training_history.jsonl` recording each run's metrics, config, and git commit.
 
 ### 7. Test the optimizer (CLI)
 
@@ -117,29 +119,43 @@ pytest tests/ -v
 
 All 11 tests should pass.
 
-### 9. Launch the Streamlit dashboard
+### 9. Launch the backend API
+
+```bash
+python -m uvicorn backend.main:app --port 8000 --reload
+```
+
+This serves the JSON API at `http://localhost:8000` (interactive docs at `http://localhost:8000/docs`). It loads the trained fuel model and generates the weather/traffic fields once at startup.
+
+### 10. Launch the React dashboard
+
+In a separate terminal:
+
+```bash
+cd frontend
+npm install
+npm run dev
+```
+
+This opens `http://localhost:5173` in your browser (it expects the backend on `http://localhost:8000`; override with a `VITE_API_BASE` env var if needed). The dashboard shows:
+
+1. **Sidebar** — Select origin/destination, aircraft, payload %, cost weights, and scenario presets
+2. **KPI cards** — Cost/fuel/CO2 savings and time delta of the best route vs. the great-circle baseline
+3. **Route Map** — One interactive MapLibre GL map with toggleable layers: routes (solid = optimized, dashed = baseline), airports, weather-risk heatmap, wind field, simulated traffic corridors, live OpenSky traffic, and NOAA METARs (hover any route/aircraft/station for details)
+4. **Trade-off Charts** — Pareto scatter and grouped bar comparison (Recharts)
+5. **Route Details Table** — Fuel, time, risk, congestion, CO2, cost per route
+
+Toggle **Enable Live Data** in the sidebar to fetch real-time traffic/METARs from OpenSky and NOAA (polled every 60s). No API keys needed.
+
+To stop either server, press `Ctrl+C` in its terminal.
+
+### Optional: the legacy Streamlit app
 
 ```bash
 streamlit run app/streamlit_app.py
 ```
 
-This opens `http://localhost:8501` in your browser. The dashboard shows:
-
-1. **Sidebar** — Select origin/destination, aircraft, payload %, cost weights, and scenario presets
-2. **Route Map** — MapLibre dark map with route paths rendered on OpenStreetMap tiles
-3. **Trade-off Charts** — Pareto scatter and grouped bar comparison
-4. **Route Details Table** — Fuel, time, risk, congestion, CO2, cost per route
-5. **Environment Layers** (6 tabs):
-   - Weather Risk (heatmap)
-   - Wind Field (arc vectors)
-   - Traffic Corridors (arc layer)
-   - Live Traffic (OpenSky aircraft, requires "Enable Live Data" toggle)
-   - NOAA METARs (station weather, requires "Enable Live Data" toggle)
-   - Weather Dashboard (4-panel Plotly overview)
-
-Toggle **Enable Live Data** in the sidebar to fetch real-time data from OpenSky and NOAA. No API keys needed.
-
-To stop the server, press `Ctrl+C` in the terminal.
+Still works standalone (no backend/frontend needed) and opens `http://localhost:8501`. Kept as a lightweight fallback; the React app is where new UI work happens.
 
 ---
 
@@ -170,11 +186,22 @@ AeroOpti/
 │   └── utils/
 │       ├── geo.py                # Haversine, bearing, great-circle math
 │       ├── metrics.py            # RMSE, MAE, MAPE, R2
-│       ├── maplibre.py           # pydeck + MapLibre + OSM tile maps
-│       └── viz.py                # Plotly charts (Pareto, bars, weather panels)
-├── app/streamlit_app.py          # Interactive dashboard
+│       ├── maplibre.py           # pydeck + MapLibre + OSM tile maps (legacy Streamlit app)
+│       └── viz.py                # Plotly charts (legacy Streamlit app)
+├── backend/                      # FastAPI wrapper around src/ (JSON API for the React app)
+│   ├── main.py                   # Routes: /api/config, /api/optimize, /api/weather-field, /api/live/*
+│   ├── schemas.py                # Pydantic request/response models
+│   └── cache.py                  # TTL cache for live-data endpoints
+├── frontend/                     # React + TypeScript + Vite dashboard (primary UI)
+│   └── src/
+│       ├── App.tsx               # Page layout and state
+│       ├── api.ts                # Backend client
+│       └── components/
+│           ├── RouteMap.tsx      # MapLibre GL map with all toggleable layers
+│           ├── Sidebar.tsx, KpiCards.tsx, Charts.tsx, RouteTable.tsx, LayerToggles.tsx
+├── app/streamlit_app.py          # Legacy standalone dashboard (still functional)
 ├── scripts/                      # CLI entrypoints
-├── tests/                        # pytest suite (11 tests)
+├── tests/                        # pytest suite (28 tests)
 ├── models/                       # Saved model artifacts (after training)
 └── docs/                         # Methodology and evaluation
 ```
@@ -207,6 +234,10 @@ All external APIs are optional. The project runs fully offline using the synthet
 **OpenSky returns empty** — The anonymous API is rate-limited (~100 requests/day). Wait a few minutes or proceed without live data.
 
 **Port 8501 already in use** — Run `streamlit run app/streamlit_app.py --server.port 8502` to use a different port.
+
+**Frontend shows a CORS error in the browser console** — This almost always means the backend returned a 500 (an unhandled server error drops CORS headers, which browsers then misreport as a CORS failure) rather than an actual CORS misconfiguration. Check the `uvicorn` terminal for a traceback.
+
+**Frontend can't reach the API / requests fail** — Make sure `python -m uvicorn backend.main:app --port 8000` is running before `npm run dev`; the frontend defaults to `http://localhost:8000` (override with `VITE_API_BASE`).
 
 ---
 

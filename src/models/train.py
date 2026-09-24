@@ -1,18 +1,33 @@
 """Unified training entrypoint for fuel and delay models."""
 
+import json
+import subprocess
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pandas as pd
 import yaml
 
-from src.models.fuel_predictor import FuelPredictor
 from src.models.delay_predictor import DelayPredictor
+from src.models.fuel_predictor import FuelPredictor
 
 
 def load_config(path: str | Path = "configs/default.yaml") -> dict:
     """Load YAML configuration."""
     with open(path) as f:
         return yaml.safe_load(f)
+
+
+def _git_commit() -> str | None:
+    """Best-effort short git commit hash for run provenance, or None if unavailable."""
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "--short", "HEAD"],
+            capture_output=True, text=True, timeout=5, check=True,
+        )
+        return result.stdout.strip()
+    except (subprocess.SubprocessError, OSError):
+        return None
 
 
 def train_all(config: dict | None = None) -> dict:
@@ -31,7 +46,7 @@ def train_all(config: dict | None = None) -> dict:
     print("Training fuel predictor (XGBoost)...")
     fp = FuelPredictor(**config["fuel_model"].get("params", {}))
     fuel_metrics = fp.fit(df)
-    fp.save(model_dir / "fuel_predictor.joblib")
+    fp.save(model_dir / "fuel_predictor")
     results["fuel"] = fuel_metrics
     print(f"  R²={fuel_metrics['r2']:.4f}  RMSE={fuel_metrics['rmse']:.1f}  "
           f"MAE={fuel_metrics['mae']:.1f}  MAPE={fuel_metrics['mape']:.2f}%")
@@ -50,5 +65,16 @@ def train_all(config: dict | None = None) -> dict:
     dp.save(model_dir / "delay_predictor.pt")
     results["delay"] = delay_metrics
     print(f"  MAE={delay_metrics['mae']:.2f} min  RMSE={delay_metrics['rmse']:.2f} min")
+
+    metrics_record = {
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "git_commit": _git_commit(),
+        "config": config,
+        "metrics": results,
+    }
+    history_path = model_dir / "training_history.jsonl"
+    with open(history_path, "a") as f:
+        f.write(json.dumps(metrics_record) + "\n")
+    (model_dir / "latest_metrics.json").write_text(json.dumps(metrics_record, indent=2))
 
     return results

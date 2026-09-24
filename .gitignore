@@ -24,6 +24,14 @@ data/processed/*
 data/cache/
 models/*.joblib
 models/*.pt
+models/*.xgb.json
+models/*.meta.json
+models/latest_metrics.json
+models/training_history.jsonl
 *.parquet
 !data/sample/*.parquet
 .streamlit/
+
+# Frontend
+frontend/node_modules/
+frontend/dist/
