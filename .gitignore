@@ -35,3 +35,6 @@ models/training_history.jsonl
 # Frontend
 frontend/node_modules/
 frontend/dist/
+
+# Local tooling
+.claude/
