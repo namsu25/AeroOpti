@@ -4,13 +4,13 @@ import {
 } from "recharts";
 import type { RouteResult } from "../types";
 
-const GRID = "#232328";
-const AXIS = "#68686f";
+const GRID = "#eff0f6";
+const AXIS = "rgba(0,0,0,0.5)";
 const TOOLTIP_STYLE = {
-  background: "#18181c", border: "1px solid rgba(255,255,255,0.16)", borderRadius: 8,
-  fontSize: 12.5, fontFamily: "Inter, sans-serif",
+  background: "#ffffff", border: "1px solid #e4e5e7", borderRadius: 10,
+  fontSize: 12.5, fontFamily: "Inter, sans-serif", boxShadow: "0 5px 20px rgba(0,0,0,0.08)",
 };
-const LEGEND_STYLE = { fontSize: 12.5, color: "#9a9aa4" };
+const LEGEND_STYLE = { fontSize: 12.5, color: "rgba(0,0,0,0.6)" };
 
 export function ParetoChart({ routes }: { routes: RouteResult[] }) {
   return (
@@ -25,7 +25,7 @@ export function ParetoChart({ routes }: { routes: RouteResult[] }) {
           <Tooltip
             cursor={{ strokeDasharray: "3 3", stroke: "#68686f" }}
             contentStyle={TOOLTIP_STYLE}
-            labelStyle={{ color: "#f4f4f5" }}
+            labelStyle={{ color: "#000000" }}
             formatter={(value, name) => {
               const n = Number(value);
               const label = name === "fuel_kg" ? `${Math.round(n)} kg` : name === "time_h" ? `${n.toFixed(2)} h` : value;
@@ -61,7 +61,7 @@ export function ComparisonBarChart({ routes }: { routes: RouteResult[] }) {
           <CartesianGrid stroke={GRID} vertical={false} />
           <XAxis dataKey="metric" stroke={AXIS} tick={{ fontSize: 12 }} />
           <YAxis stroke={AXIS} tick={{ fontSize: 12 }} />
-          <Tooltip contentStyle={TOOLTIP_STYLE} labelStyle={{ color: "#f4f4f5" }} cursor={{ fill: "rgba(255,255,255,0.03)" }} />
+          <Tooltip contentStyle={TOOLTIP_STYLE} labelStyle={{ color: "#000000" }} cursor={{ fill: "rgba(0,0,0,0.03)" }} />
           <Legend wrapperStyle={LEGEND_STYLE} />
           {routes.map((r) => (
             <Bar key={r.name} dataKey={r.name} fill={r.color} radius={[3, 3, 0, 0]} />

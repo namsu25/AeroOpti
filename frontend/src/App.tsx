@@ -13,10 +13,11 @@ import "./App.css";
 
 const DEFAULT_WEIGHTS: Weights = { fuel: 1.0, time: 0.5, risk: 2.0, airspace_fee: 0.3, traffic: 0.5 };
 
-// Render-inspired palette applied client-side: neutral baseline, violet for the
-// A* candidate, mint for the RL-refined candidate -- keeps presentation decisions
-// out of the backend, which just returns routes in a fixed order.
-const ROUTE_PALETTE = ["#8b8b95", "#9b52fb", "#34d399"];
+// Figma design palette applied client-side: neutral baseline, blue (#1B59F8) for
+// the A* candidate, green (#1FE08F) for the RL-refined candidate -- keeps
+// presentation decisions out of the backend, which just returns routes in a
+// fixed order.
+const ROUTE_PALETTE = ["#8b8b95", "#1b59f8", "#1fe08f"];
 
 function paletteize(res: OptimizeResponse): OptimizeResponse {
   return {

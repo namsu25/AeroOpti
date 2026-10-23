@@ -1,6 +1,6 @@
 import { GeoJSONSource, LngLatBounds, Map as MlMap, NavigationControl, Popup } from "maplibre-gl";
 import "maplibre-gl/dist/maplibre-gl.css";
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 import type {
   Config, LayerKey, LiveAircraft, Metar, RouteResult, TrafficField, WeatherField,
 } from "../types";
@@ -14,6 +14,19 @@ const BASE_STYLE_URL = "https://demotiles.maplibre.org/style.json";
 const CATEGORY_COLOR: Record<string, string> = {
   VFR: "#2ECC71", MVFR: "#4A90D9", IFR: "#E74C3C", LIFR: "#9B59B6",
 };
+
+/** [lat, lon] points -> [lon, lat] with longitudes made continuous across the antimeridian. */
+function unwrapLine(points: [number, number][]): [number, number][] {
+  let offset = 0;
+  return points.map(([lat, lon], i) => {
+    if (i > 0) {
+      const prev = points[i - 1][1];
+      if (lon - prev > 180) offset -= 360;
+      else if (lon - prev < -180) offset += 360;
+    }
+    return [lon + offset, lat];
+  });
+}
 
 function emptyFC(): GeoJSON.FeatureCollection {
   return { type: "FeatureCollection", features: [] };
@@ -39,7 +52,7 @@ export default function RouteMap({
   const containerRef = useRef<HTMLDivElement>(null);
   const mapRef = useRef<MlMap | null>(null);
   const popupRef = useRef<Popup | null>(null);
-  const readyRef = useRef(false);
+  const [ready, setReady] = useState(false);
 
   // --- create the map once ---
   useEffect(() => {
@@ -51,8 +64,6 @@ export default function RouteMap({
       zoom: 2.2,
     });
     map.addControl(new NavigationControl(), "top-right");
-    // Approximate the original "dark OSM" basemap look without needing a styled tile server / API key.
-    map.getContainer().style.filter = "invert(1) hue-rotate(180deg) brightness(0.95) contrast(0.9)";
     popupRef.current = new Popup({ closeButton: false, closeOnClick: false });
     map.on("error", (e) => console.error("[AeroOpti map error]", e.error ?? e));
     // "style.load" fires once the style/sprite/glyphs are parsed and does NOT wait
@@ -75,12 +86,12 @@ export default function RouteMap({
       map.addSource("airports", { type: "geojson", data: emptyFC() });
       map.addLayer({
         id: "airports-point", type: "circle", source: "airports",
-        paint: { "circle-radius": 6, "circle-color": "#FF6B6B", "circle-stroke-color": "#fff", "circle-stroke-width": 1.5 },
+        paint: { "circle-radius": 6, "circle-color": "#1b59f8", "circle-stroke-color": "#fff", "circle-stroke-width": 1.5 },
       });
       map.addLayer({
         id: "airports-label", type: "symbol", source: "airports",
         layout: { "text-field": ["get", "code"], "text-offset": [0, 1.2], "text-size": 12 },
-        paint: { "text-color": "#fff", "text-halo-color": "#000", "text-halo-width": 1 },
+        paint: { "text-color": "#151e23", "text-halo-color": "#fff", "text-halo-width": 1.5 },
       });
 
       map.addSource("risk-heat", { type: "geojson", data: emptyFC() });
@@ -89,7 +100,7 @@ export default function RouteMap({
         paint: {
           "heatmap-weight": ["get", "risk"],
           "heatmap-intensity": 1.2,
-          "heatmap-radius": 18,
+          "heatmap-radius": ["interpolate", ["exponential", 2], ["zoom"], 1, 12, 3, 40, 5, 120, 7, 320],
           "heatmap-opacity": 0.65,
           "heatmap-color": [
             "interpolate", ["linear"], ["heatmap-density"],
@@ -147,21 +158,21 @@ export default function RouteMap({
         });
       }
 
-      readyRef.current = true;
+      setReady(true);
     });
 
     mapRef.current = map;
     return () => {
       map.remove();
       mapRef.current = null;
-      readyRef.current = false;
+      setReady(false);
     };
   }, []);
 
   // --- routes + airports ---
   useEffect(() => {
     const map = mapRef.current;
-    if (!map || !readyRef.current || !config) return;
+    if (!map || !ready || !config) return;
 
     const routeFeatures: GeoJSON.Feature[] = routes.map((r, i) => ({
       type: "Feature",
@@ -169,7 +180,7 @@ export default function RouteMap({
         name: r.name, fuel_kg: r.fuel_kg, time_h: r.time_h, color: r.color,
         best: i === bestIndex, baseline: i === 0,
       },
-      geometry: { type: "LineString", coordinates: r.points.map(([lat, lon]) => [lon, lat]) },
+      geometry: { type: "LineString", coordinates: unwrapLine(r.points) },
     }));
     (map.getSource("routes") as GeoJSONSource | undefined)?.setData({
       type: "FeatureCollection", features: routeFeatures,
@@ -189,19 +200,19 @@ export default function RouteMap({
 
     if (routes.length > 0) {
       const bounds = new LngLatBounds();
-      routes.forEach((r) => r.points.forEach(([lat, lon]) => bounds.extend([lon, lat])));
+      routes.forEach((r) => unwrapLine(r.points).forEach((pt) => bounds.extend(pt)));
       map.fitBounds(bounds, { padding: 60, maxZoom: 6, duration: 500 });
     } else if (airportFeatures.length === 2) {
       const bounds = new LngLatBounds();
       airportFeatures.forEach((f) => bounds.extend((f.geometry as GeoJSON.Point).coordinates as [number, number]));
       map.fitBounds(bounds, { padding: 80, maxZoom: 5, duration: 500 });
     }
-  }, [routes, bestIndex, origin, destination, config]);
+  }, [ready, routes, bestIndex, origin, destination, config]);
 
   // --- weather risk heatmap + wind field ---
   useEffect(() => {
     const map = mapRef.current;
-    if (!map || !readyRef.current) return;
+    if (!map || !ready) return;
 
     const riskFeatures: GeoJSON.Feature[] = [];
     const windFeatures: GeoJSON.Feature[] = [];
@@ -241,26 +252,26 @@ export default function RouteMap({
     (map.getSource("wind") as GeoJSONSource | undefined)?.setData({
       type: "FeatureCollection", features: windFeatures,
     });
-  }, [weatherField]);
+  }, [ready, weatherField]);
 
   // --- traffic corridors ---
   useEffect(() => {
     const map = mapRef.current;
-    if (!map || !readyRef.current) return;
+    if (!map || !ready) return;
     const features: GeoJSON.Feature[] = (trafficField?.corridors ?? []).map((c) => ({
       type: "Feature",
       properties: { width: Math.max(1, c.intensity / 4) },
-      geometry: { type: "LineString", coordinates: c.path.map(([lat, lon]) => [lon, lat]) },
+      geometry: { type: "LineString", coordinates: unwrapLine(c.path) },
     }));
     (map.getSource("corridors") as GeoJSONSource | undefined)?.setData({
       type: "FeatureCollection", features,
     });
-  }, [trafficField]);
+  }, [ready, trafficField]);
 
   // --- live traffic ---
   useEffect(() => {
     const map = mapRef.current;
-    if (!map || !readyRef.current) return;
+    if (!map || !ready) return;
     const features: GeoJSON.Feature[] = liveAircraft
       .filter((a) => Number.isFinite(a.lat) && Number.isFinite(a.lon))
       .map((a) => ({
@@ -271,12 +282,12 @@ export default function RouteMap({
     (map.getSource("live") as GeoJSONSource | undefined)?.setData({
       type: "FeatureCollection", features,
     });
-  }, [liveAircraft]);
+  }, [ready, liveAircraft]);
 
   // --- METARs ---
   useEffect(() => {
     const map = mapRef.current;
-    if (!map || !readyRef.current) return;
+    if (!map || !ready) return;
     const features: GeoJSON.Feature[] = metars.map((m) => ({
       type: "Feature",
       properties: { ...m, color: CATEGORY_COLOR[m.category] ?? "#95A5A6" },
@@ -285,19 +296,30 @@ export default function RouteMap({
     (map.getSource("metars") as GeoJSONSource | undefined)?.setData({
       type: "FeatureCollection", features,
     });
-  }, [metars]);
+  }, [ready, metars]);
 
   // --- layer visibility toggles ---
   useEffect(() => {
     const map = mapRef.current;
-    if (!map || !readyRef.current) return;
-    const vis = (id: string, on: boolean) => map.setLayoutProperty(id, "visibility", on ? "visible" : "none");
-    vis("risk-heat-layer", activeLayers.has("risk"));
-    vis("wind-line", activeLayers.has("wind"));
-    vis("corridors-line", activeLayers.has("corridors"));
-    vis("live-point", activeLayers.has("live"));
-    vis("metars-point", activeLayers.has("metars"));
-  }, [activeLayers]);
+    if (!map || !ready) return;
+    const targets: [string, LayerKey][] = [
+      ["risk-heat-layer", "risk"], ["wind-line", "wind"], ["corridors-line", "corridors"],
+      ["live-point", "live"], ["metars-point", "metars"],
+    ];
+    // setLayoutProperty throws "Style is not done loading" while any GeoJSON source is
+    // still processing fresh data; retry once the map goes idle instead of crashing React.
+    const apply = () => {
+      try {
+        for (const [id, key] of targets) {
+          map.setLayoutProperty(id, "visibility", activeLayers.has(key) ? "visible" : "none");
+        }
+      } catch {
+        map.once("idle", apply);
+      }
+    };
+    apply();
+    return () => { map.off("idle", apply); };
+  }, [ready, activeLayers]);
 
   return <div ref={containerRef} className="route-map" />;
 }

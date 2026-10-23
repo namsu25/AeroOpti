@@ -2,6 +2,7 @@
 
 import logging
 import math
+import re
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 
@@ -146,42 +147,67 @@ class AviationWeatherReport:
     severity: str = ""
 
 
+_GLOBAL_BBOX = (-60.0, -180.0, 75.0, 180.0)
+_HPA_TO_INHG = 0.02953
+
+
+def _num(value, default: float) -> float:
+    """Best-effort float: handles None, '6+', 'VRB' and similar METAR strings."""
+    if value is None:
+        return default
+    if isinstance(value, (int, float)):
+        return float(value)
+    match = re.search(r"-?\d+(?:\.\d+)?", str(value))
+    return float(match.group()) if match else default
+
+
+def _ceiling_ft(clouds: list[dict]) -> float:
+    """Lowest BKN/OVC/VV layer base in feet, or 99999 when the sky is open."""
+    bases = [c.get("base") for c in clouds or []
+             if c.get("cover") in ("BKN", "OVC", "OVX", "VV") and c.get("base") is not None]
+    return float(min(bases)) if bases else 99999.0
+
+
 def fetch_noaa_metars(bbox: tuple[float, float, float, float] | None = None) -> list[AviationWeatherReport]:
     """Fetch current METARs from NOAA Aviation Weather Center.
 
-    bbox = (min_lat, min_lon, max_lat, max_lon) or None for global.
-    Uses the aviationweather.gov v1 data API.
+    bbox = (min_lat, min_lon, max_lat, max_lon); defaults to the whole world,
+    because the API rejects requests with neither station ids nor a bbox.
     """
+    min_lat, min_lon, max_lat, max_lon = bbox or _GLOBAL_BBOX
     try:
-        url = "https://aviationweather.gov/api/data/metar"
-        params = {"format": "json", "hours": 2}
-        if bbox:
-            params["bbox"] = f"{bbox[1]},{bbox[0]},{bbox[3]},{bbox[2]}"
-
-        resp = _session().get(url, params=params, timeout=15)
+        resp = _session().get(
+            "https://aviationweather.gov/api/data/metar",
+            params={"format": "json", "bbox": f"{min_lat},{min_lon},{max_lat},{max_lon}"},
+            timeout=20,
+        )
         resp.raise_for_status()
         data = resp.json()
+    except (requests.RequestException, ValueError) as exc:
+        logger.warning("NOAA METAR fetch failed: %s", exc)
+        return []
 
-        reports = []
-        for m in data:
+    reports = []
+    for m in data:
+        try:
+            altim = _num(m.get("altim"), 29.92)
             reports.append(AviationWeatherReport(
                 report_type="METAR",
                 raw_text=m.get("rawOb", ""),
                 station_id=m.get("icaoId", ""),
-                lat=float(m.get("lat", 0)),
-                lon=float(m.get("lon", 0)),
-                flight_category=m.get("fltcat", ""),
-                wind_speed_kts=float(m.get("wspd", 0) or 0),
-                wind_dir_deg=float(m.get("wdir", 0) or 0),
-                visibility_mi=float(m.get("visib", 10) or 10),
-                ceiling_ft=float(m.get("ceil", 99999) or 99999),
-                temp_c=float(m.get("temp", 0) or 0),
-                altimeter_inhg=float(m.get("altim", 29.92) or 29.92),
+                lat=float(m["lat"]),
+                lon=float(m["lon"]),
+                flight_category=m.get("fltCat") or m.get("fltcat") or "",
+                wind_speed_kts=_num(m.get("wspd"), 0.0),
+                wind_dir_deg=_num(m.get("wdir"), 0.0),
+                visibility_mi=_num(m.get("visib"), 10.0),
+                ceiling_ft=_ceiling_ft(m.get("clouds")),
+                temp_c=_num(m.get("temp"), 0.0),
+                altimeter_inhg=altim * _HPA_TO_INHG if altim > 100 else altim,
             ))
-        return reports
-    except (requests.RequestException, KeyError, ValueError) as exc:
-        logger.warning("NOAA METAR fetch failed: %s", exc)
-        return []
+        except (KeyError, TypeError, ValueError) as exc:
+            logger.debug("Skipping malformed METAR %s: %s", m.get("icaoId"), exc)
+    return reports
 
 
 def fetch_noaa_sigmets() -> list[AviationWeatherReport]:
@@ -209,7 +235,7 @@ def fetch_noaa_sigmets() -> list[AviationWeatherReport]:
                 raw_text=s.get("rawAirSigmet", ""),
                 lat=center_lat,
                 lon=center_lon,
-                severity=s.get("severity", ""),
+                severity=str(s.get("severity", "")),
             ))
         return reports
     except (requests.RequestException, KeyError, ValueError) as exc:
